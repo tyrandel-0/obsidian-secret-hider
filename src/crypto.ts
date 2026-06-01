@@ -2,16 +2,25 @@ const SALT_LEN = 16;
 const IV_LEN = 12;
 const PBKDF2_ITERATIONS = 100_000;
 
+// TS 5.x types Uint8Array.buffer as ArrayBuffer|SharedArrayBuffer.
+// WebCrypto requires a plain ArrayBuffer, so we always copy into a fresh one.
+function toArrayBuffer(arr: Uint8Array): ArrayBuffer {
+	const buf = new ArrayBuffer(arr.byteLength);
+	new Uint8Array(buf).set(arr);
+	return buf;
+}
+
 async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+	const encoded = new TextEncoder().encode(password);
 	const raw = await crypto.subtle.importKey(
 		'raw',
-		new TextEncoder().encode(password),
+		toArrayBuffer(encoded),
 		'PBKDF2',
 		false,
 		['deriveKey'],
 	);
 	return crypto.subtle.deriveKey(
-		{ name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+		{ name: 'PBKDF2', salt: toArrayBuffer(salt), iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
 		raw,
 		{ name: 'AES-GCM', length: 256 },
 		false,
