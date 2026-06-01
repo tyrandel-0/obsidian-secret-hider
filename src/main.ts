@@ -182,14 +182,17 @@ export default class SecretHiderPlugin extends Plugin {
 	 *   since Obsidian may store checkbox values differently across platforms.
 	 */
 	private async findSecretFiles(): Promise<TFile[]> {
-		const prop = this.settings.secretProperty;
+		// Compare case-insensitively: "Secret" and "secret" are the same property
+		const prop = this.settings.secretProperty.toLowerCase();
 		const result: TFile[] = [];
 
 		for (const file of this.app.vault.getMarkdownFiles()) {
 			const cache = this.app.metadataCache.getFileCache(file);
 
 			if (cache?.frontmatter) {
-				if (isSecretValue(cache.frontmatter[prop])) result.push(file);
+				// Find the key ignoring case ("Secret", "SECRET", "secret" all match)
+				const key = Object.keys(cache.frontmatter).find(k => k.toLowerCase() === prop);
+				if (key && isSecretValue(cache.frontmatter[key])) result.push(file);
 			} else {
 				// Cache miss — read the raw file and parse frontmatter ourselves
 				try {
