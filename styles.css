@@ -34,6 +34,26 @@
 	background-color: var(--color-red, #e03e3e);
 }
 
+@keyframes secret-hider-spin {
+	to { transform: rotate(360deg); }
+}
+
+.secret-hider-btn--busy {
+	cursor: wait;
+	opacity: 0.75;
+	pointer-events: none;
+}
+
+.secret-hider-btn--busy::after {
+	content: '';
+	position: absolute;
+	inset: -4px;
+	border-radius: 50%;
+	border: 3px solid transparent;
+	border-top-color: var(--text-on-accent, #fff);
+	animation: secret-hider-spin 0.8s linear infinite;
+}
+
 .secret-hider-error {
 	color: var(--color-red, #e03e3e);
 	font-size: 0.85em;
