@@ -148,9 +148,13 @@ export default class SecretHiderPlugin extends Plugin {
 	// ── Lock ──────────────────────────────────────────────────────────────────
 
 	private async lock() {
-		const secretFiles = this.findSecretFiles();
+		const secretFiles = await this.findSecretFiles();
 		if (secretFiles.length === 0) {
-			new Notice(`Secret Hider: no files with "${this.settings.secretProperty}: true" found.`);
+			const total = this.app.vault.getMarkdownFiles().length;
+			new Notice(
+				`Secret Hider: no files found with property "${this.settings.secretProperty}" set to true` +
+				` (scanned ${total} markdown files).`,
+			);
 			return;
 		}
 
@@ -169,12 +173,35 @@ export default class SecretHiderPlugin extends Plugin {
 		}
 	}
 
-	private findSecretFiles(): TFile[] {
+	/**
+	 * Find all markdown files where the secret property is truthy.
+	 * - Tries metadata cache first (fast path).
+	 * - Falls back to reading the file directly when cache is empty
+	 *   (common on mobile for recently edited / freshly created files).
+	 * - Accepts both boolean true and string "true" / "yes" / "on"
+	 *   since Obsidian may store checkbox values differently across platforms.
+	 */
+	private async findSecretFiles(): Promise<TFile[]> {
 		const prop = this.settings.secretProperty;
-		return this.app.vault.getMarkdownFiles().filter(file => {
+		const result: TFile[] = [];
+
+		for (const file of this.app.vault.getMarkdownFiles()) {
 			const cache = this.app.metadataCache.getFileCache(file);
-			return cache?.frontmatter?.[prop] === true;
-		});
+
+			if (cache?.frontmatter) {
+				if (isSecretValue(cache.frontmatter[prop])) result.push(file);
+			} else {
+				// Cache miss — read the raw file and parse frontmatter ourselves
+				try {
+					const content = await this.app.vault.read(file);
+					if (rawFrontmatterHasProp(content, prop)) result.push(file);
+				} catch {
+					// Unreadable file — skip silently
+				}
+			}
+		}
+
+		return result;
 	}
 
 	/**
@@ -378,4 +405,30 @@ export default class SecretHiderPlugin extends Plugin {
 	async saveSettings() {
 		await this.savePluginData();
 	}
+}
+
+// ── Module-level helpers ──────────────────────────────────────────────────────
+
+/**
+ * Returns true when a frontmatter value should be treated as "secret = on".
+ * Handles: boolean true, strings "true" / "yes" / "on" (YAML truthy aliases),
+ * and the number 1 — covers all ways Obsidian may serialise a checkbox.
+ */
+function isSecretValue(val: unknown): boolean {
+	return val === true || val === 1 || val === 'true' || val === 'yes' || val === 'on';
+}
+
+/**
+ * Parse the raw YAML frontmatter block from file content and check whether
+ * `prop` is set to a truthy value. Used when the metadata cache is empty.
+ */
+function rawFrontmatterHasProp(content: string, prop: string): boolean {
+	const block = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+	if (!block) return false;
+	const escaped = prop.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// Matches: prop: true  |  prop: "true"  |  prop: yes  |  prop: on  |  prop: 1
+	return new RegExp(
+		`^${escaped}\\s*:\\s*(true|"true"|'true'|yes|on|1)\\s*$`,
+		'im',
+	).test(block[1] ?? '');
 }
