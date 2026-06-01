@@ -1,5 +1,6 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type SecretHiderPlugin from './main';
+import { isSecureStorageAvailable } from './password-storage';
 
 export interface SecretHiderSettings {
 	secretProperty: string;
@@ -20,6 +21,9 @@ export class SecretHiderSettingTab extends PluginSettingTab {
 	display() {
 		const { containerEl } = this;
 		containerEl.empty();
+
+		// ── General ───────────────────────────────────────────────────────────
+
 		containerEl.createEl('h2', { text: 'Secret Hider' });
 
 		new Setting(containerEl)
@@ -38,5 +42,101 @@ export class SecretHiderSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		// ── Password storage ──────────────────────────────────────────────────
+
+		containerEl.createEl('h2', { text: 'Password' });
+
+		const available = isSecureStorageAvailable();
+
+		if (!available) {
+			// Show a warning if the OS cannot provide secure storage (some Linux configs)
+			const warn = containerEl.createEl('p', {
+				cls: 'secret-hider-error',
+				text: '⚠ Secure OS storage is not available on this device (no GNOME Keyring / KWallet detected). '
+					+ 'Password cannot be saved — you will need to enter it manually each time.',
+			});
+			warn.style.marginBottom = '12px';
+			return;
+		}
+
+		const hasPassword = this.plugin.hasStoredPassword;
+
+		if (hasPassword) {
+			// Password is already saved — show status + Forget button
+			new Setting(containerEl)
+				.setName('Saved password')
+				.setDesc(
+					'A password is stored in the OS keychain (macOS Keychain / Windows DPAPI). ' +
+					'Lock and unlock will happen automatically without a prompt.',
+				)
+				.addButton(btn =>
+					btn
+						.setButtonText('Forget password')
+						.setWarning()
+						.onClick(async () => {
+							await this.plugin.forgetPassword();
+							new Notice('Secret Hider: password forgotten.');
+							this.display(); // re-render
+						}),
+				);
+		} else {
+			// No password saved — show input + Save button
+			new Setting(containerEl)
+				.setName('Save password')
+				.setDesc(
+					'Password will be encrypted by the OS and stored in the keychain. ' +
+					'It is machine-specific: if you open this vault on another device, ' +
+					'you will be prompted to enter the password once on that device too.',
+				);
+
+			let draft = '';
+			let draftConfirm = '';
+
+			const errorEl = containerEl.createEl('p', { cls: 'secret-hider-error' });
+			errorEl.style.display = 'none';
+
+			new Setting(containerEl).setName('New password').addText(text => {
+				text.inputEl.type = 'password';
+				text.inputEl.style.width = '220px';
+				text.onChange(v => (draft = v));
+			});
+
+			new Setting(containerEl).setName('Confirm password').addText(text => {
+				text.inputEl.type = 'password';
+				text.inputEl.style.width = '220px';
+				text.onChange(v => (draftConfirm = v));
+			});
+
+			new Setting(containerEl).addButton(btn =>
+				btn
+					.setButtonText('Save password')
+					.setCta()
+					.onClick(async () => {
+						if (!draft) {
+							errorEl.setText('Password cannot be empty.');
+							errorEl.style.display = '';
+							return;
+						}
+						if (draft !== draftConfirm) {
+							errorEl.setText('Passwords do not match.');
+							errorEl.style.display = '';
+							return;
+						}
+						await this.plugin.setAndSavePassword(draft);
+						new Notice('Secret Hider: password saved to OS keychain.');
+						this.display(); // re-render to show "Saved" state
+					}),
+			);
+		}
+
+		// ── Hint ─────────────────────────────────────────────────────────────
+
+		const hint = containerEl.createEl('p');
+		hint.style.cssText = 'font-size:0.85em; color:var(--text-muted); margin-top:8px;';
+		hint.setText(
+			'Even with a saved password, the files on disk are always AES-256-GCM encrypted. ' +
+			'The OS keychain only stores the key that unlocks them — it never touches your files directly.',
+		);
 	}
 }

@@ -8,26 +8,25 @@ import {
 } from './crypto';
 import { PasswordModal, PasswordConfirmModal } from './modals';
 import { SecretHiderSettings, DEFAULT_SETTINGS, SecretHiderSettingTab } from './settings';
+import { isSecureStorageAvailable, encryptPassword, decryptPassword } from './password-storage';
 
 const ENC_EXT = '.enc';
 const FILE_MARKER = 'OBSIDIAN-SECRET-HIDER-V1\n';
 
 class WrongPasswordError extends Error {
-	constructor() {
-		super('wrong-password');
-	}
+	constructor() { super('wrong-password'); }
 }
 
-/** Saved during lock so unlock can find the exact original paths without a vault walk. */
 interface LockedFileEntry {
-	originalPath: string; // 'Notes/diary.md'
-	encPath: string;      // 'Notes/diary.md.enc'
+	originalPath: string;
+	encPath: string;
 }
 
 interface PluginData {
 	settings: SecretHiderSettings;
 	isLocked: boolean;
 	lockedFiles: LockedFileEntry[];
+	encryptedPassword?: string; // safeStorage-encrypted base64; never the plaintext
 }
 
 export default class SecretHiderPlugin extends Plugin {
@@ -36,6 +35,13 @@ export default class SecretHiderPlugin extends Plugin {
 	private lockedFiles: LockedFileEntry[] = [];
 	private busy = false;
 	private floatingBtn!: HTMLElement;
+
+	// Password in memory (decrypted). Never written to disk in plain form.
+	private storedPassword: string | null = null;
+	// Encrypted password blob stored in data.json.
+	private encryptedPassword: string | undefined;
+
+	// ── Lifecycle ─────────────────────────────────────────────────────────────
 
 	async onload() {
 		await this.loadPluginData();
@@ -50,6 +56,25 @@ export default class SecretHiderPlugin extends Plugin {
 
 	onunload() {
 		this.floatingBtn?.remove();
+		this.storedPassword = null; // wipe from memory on plugin unload
+	}
+
+	// ── Public API for settings tab ───────────────────────────────────────────
+
+	get hasStoredPassword(): boolean {
+		return this.storedPassword !== null;
+	}
+
+	async setAndSavePassword(password: string) {
+		this.storedPassword = password;
+		this.encryptedPassword = encryptPassword(password);
+		await this.savePluginData();
+	}
+
+	async forgetPassword() {
+		this.storedPassword = null;
+		this.encryptedPassword = undefined;
+		await this.savePluginData();
 	}
 
 	// ── Floating button ───────────────────────────────────────────────────────
@@ -92,6 +117,29 @@ export default class SecretHiderPlugin extends Plugin {
 		}
 	}
 
+	// ── Password resolution ───────────────────────────────────────────────────
+
+	/**
+	 * Returns the password to use for the current operation.
+	 *   - If a password is saved in the OS keychain → return it immediately (no UI).
+	 *   - Otherwise → open the appropriate modal and wait for user input.
+	 *     mode='lock'   → PasswordConfirmModal (requires confirmation, sets password for this op)
+	 *     mode='unlock' → PasswordModal (single field)
+	 */
+	private async getPassword(mode: 'lock' | 'unlock'): Promise<string | null> {
+		if (this.storedPassword) return this.storedPassword;
+
+		if (mode === 'lock') {
+			const modal = new PasswordConfirmModal(this.app);
+			modal.open();
+			return modal.result;
+		} else {
+			const modal = new PasswordModal(this.app);
+			modal.open();
+			return modal.result;
+		}
+	}
+
 	// ── Lock ──────────────────────────────────────────────────────────────────
 
 	private async lock() {
@@ -101,9 +149,7 @@ export default class SecretHiderPlugin extends Plugin {
 			return;
 		}
 
-		const modal = new PasswordConfirmModal(this.app);
-		modal.open();
-		const password = await modal.result;
+		const password = await this.getPassword('lock');
 		if (!password) return;
 
 		try {
@@ -128,31 +174,18 @@ export default class SecretHiderPlugin extends Plugin {
 
 	/**
 	 * Atomic lock — 3 phases:
-	 *
-	 *   Phase 1: Derive key ONCE. Read + encrypt ALL files in parallel.
-	 *            No disk writes yet — a failure here leaves everything intact.
-	 *
-	 *   Phase 2: Write ALL .enc files sequentially.
-	 *            On any failure: roll back every .enc already written, throw.
-	 *            Originals are untouched.
-	 *
-	 *   Phase 3: All .enc confirmed on disk → delete originals in parallel.
-	 *            A delete failure is safe: .enc already holds the data.
-	 *
-	 * Returns a manifest of {originalPath, encPath} pairs for fast unlock.
+	 *   1. Derive key ONCE. Read + encrypt all files in parallel (no disk writes yet).
+	 *   2. Write ALL .enc files sequentially. Rollback on any failure — originals untouched.
+	 *   3. All .enc confirmed → delete originals in parallel. Delete failures are safe.
 	 */
 	private async lockFiles(files: TFile[], password: string): Promise<LockedFileEntry[]> {
-		// Close any open editor tabs first
 		for (const file of files) {
 			this.app.workspace.getLeavesOfType('markdown').forEach(leaf => {
 				const view = leaf.view;
-				if (view instanceof MarkdownView && view.file?.path === file.path) {
-					leaf.detach();
-				}
+				if (view instanceof MarkdownView && view.file?.path === file.path) leaf.detach();
 			});
 		}
 
-		// Phase 1: derive key ONCE, then read + encrypt all files in parallel
 		const { key, salt } = await createBatchKey(password);
 
 		type Prepared = { file: TFile; encPath: string; encData: string };
@@ -164,7 +197,6 @@ export default class SecretHiderPlugin extends Plugin {
 			}),
 		);
 
-		// Phase 2: write .enc files sequentially — roll back on any failure
 		const written: string[] = [];
 		try {
 			for (const { encPath, encData } of prepared) {
@@ -178,7 +210,6 @@ export default class SecretHiderPlugin extends Plugin {
 			);
 		}
 
-		// Phase 3: all .enc files safely on disk — delete originals in parallel
 		await Promise.allSettled(
 			prepared.map(({ file }) =>
 				this.app.vault.delete(file).catch(e => {
@@ -193,9 +224,7 @@ export default class SecretHiderPlugin extends Plugin {
 	// ── Unlock ────────────────────────────────────────────────────────────────
 
 	private async unlock() {
-		const modal = new PasswordModal(this.app);
-		modal.open();
-		const password = await modal.result;
+		const password = await this.getPassword('unlock');
 		if (!password) return;
 
 		try {
@@ -216,27 +245,20 @@ export default class SecretHiderPlugin extends Plugin {
 
 	/**
 	 * Atomic unlock — 2 phases:
-	 *
-	 *   Phase 1: Find .enc files via manifest (fast) or vault walk (fallback).
-	 *            Read all in parallel. Group by embedded salt — derive 1 key per
-	 *            unique salt (usually just 1 if locked in a single session).
-	 *            Decrypt all in parallel. Wrong password → throw before any disk write.
-	 *
-	 *   Phase 2: Write all .md files sequentially (stop on first failure — .enc intact).
-	 *            Remove all .enc files in parallel after writes succeed.
+	 *   1. Resolve paths (manifest → O(1), fallback → vault walk).
+	 *      Read all .enc in parallel. Group by salt → 1 PBKDF2 per unique salt.
+	 *      Decrypt all in parallel. Wrong password → throw before any disk write.
+	 *   2. Write .md files sequentially (stop on first failure; .enc files stay intact).
+	 *      Remove .enc files in parallel after all writes succeed.
 	 */
 	private async unlockFiles(password: string): Promise<number> {
-		// Resolve .enc paths: prefer manifest (O(1)), fall back to vault walk (O(vault))
 		const encPaths =
 			this.lockedFiles.length > 0
 				? this.lockedFiles.map(e => e.encPath)
 				: await this.findEncryptedFilesFallback();
 
-		if (encPaths.length === 0) {
-			throw new Error('no encrypted files found in vault');
-		}
+		if (encPaths.length === 0) throw new Error('no encrypted files found in vault');
 
-		// Phase 1a: read all .enc files in parallel (skip missing — may have been restored already)
 		const readResults = await Promise.allSettled(
 			encPaths.map(async encPath => ({ encPath, raw: await this.app.vault.adapter.read(encPath) })),
 		);
@@ -248,11 +270,8 @@ export default class SecretHiderPlugin extends Plugin {
 			)
 			.map(r => r.value);
 
-		if (ourFiles.length === 0) {
-			throw new Error('no Secret Hider encrypted files found');
-		}
+		if (ourFiles.length === 0) throw new Error('no Secret Hider encrypted files found');
 
-		// Phase 1b: group by embedded salt → 1 PBKDF2 derivation per unique salt
 		type DecEntry = { encPath: string; encData: string; mdPath: string };
 		type SaltGroup = { salt: Uint8Array; entries: DecEntry[] };
 		const saltGroups: SaltGroup[] = [];
@@ -260,8 +279,6 @@ export default class SecretHiderPlugin extends Plugin {
 		for (const { encPath, raw } of ourFiles) {
 			const encData = raw.slice(FILE_MARKER.length);
 			const salt = extractSalt(encData);
-
-			// Use manifest's originalPath if available (prevents path-derivation bugs)
 			const mdPath =
 				this.lockedFiles.find(e => e.encPath === encPath)?.originalPath ??
 				encPath.slice(0, -ENC_EXT.length);
@@ -269,25 +286,19 @@ export default class SecretHiderPlugin extends Plugin {
 			const group = saltGroups.find(
 				g => g.salt.length === salt.length && g.salt.every((b, i) => b === salt[i]),
 			);
-			if (group) {
-				group.entries.push({ encPath, encData, mdPath });
-			} else {
-				saltGroups.push({ salt, entries: [{ encPath, encData, mdPath }] });
-			}
+			if (group) group.entries.push({ encPath, encData, mdPath });
+			else saltGroups.push({ salt, entries: [{ encPath, encData, mdPath }] });
 		}
 
-		// Phase 1c: decrypt all in parallel, grouped by salt (1 PBKDF2 per group)
 		type Decrypted = { mdPath: string; encPath: string; content: string };
 		const decrypted: Decrypted[] = [];
 
 		for (const { salt, entries } of saltGroups) {
 			const key = await deriveKeyForSalt(password, salt);
-
 			const results = await Promise.all(
 				entries.map(async ({ encPath, encData, mdPath }): Promise<Decrypted> => {
 					try {
-						const content = await decryptWithKey(encData, key);
-						return { mdPath, encPath, content };
+						return { mdPath, encPath, content: await decryptWithKey(encData, key) };
 					} catch {
 						throw new WrongPasswordError();
 					}
@@ -296,13 +307,10 @@ export default class SecretHiderPlugin extends Plugin {
 			decrypted.push(...results);
 		}
 
-		// Phase 2a: write all .md files sequentially
-		// Stop on first failure — unwritten files still have their .enc intact.
 		for (const { mdPath, content } of decrypted) {
 			await this.app.vault.adapter.write(mdPath, content);
 		}
 
-		// Phase 2b: all .md written — remove .enc files in parallel
 		await Promise.allSettled(
 			decrypted.map(({ encPath }) =>
 				this.app.vault.adapter.remove(encPath).catch(e => {
@@ -314,7 +322,6 @@ export default class SecretHiderPlugin extends Plugin {
 		return decrypted.length;
 	}
 
-	/** Fallback vault walk — used only when manifest is missing (migration / data loss recovery). */
 	private async findEncryptedFilesFallback(): Promise<string[]> {
 		const results: string[] = [];
 		await this.walkForEncFiles('/', results);
@@ -328,7 +335,7 @@ export default class SecretHiderPlugin extends Plugin {
 		}
 		for (const sub of folders) {
 			const name = sub.split('/').pop() ?? sub;
-			if (name.startsWith('.')) continue; // skip .obsidian, .trash, .git, etc.
+			if (name.startsWith('.')) continue;
 			await this.walkForEncFiles(sub, out);
 		}
 	}
@@ -340,6 +347,17 @@ export default class SecretHiderPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw?.settings ?? {});
 		this.isLocked = raw?.isLocked ?? false;
 		this.lockedFiles = raw?.lockedFiles ?? [];
+		this.encryptedPassword = raw?.encryptedPassword;
+
+		// Decrypt stored password if safeStorage is available on this machine
+		if (this.encryptedPassword && isSecureStorageAvailable()) {
+			try {
+				this.storedPassword = decryptPassword(this.encryptedPassword);
+			} catch {
+				// Different machine / OS reinstall — key changed, treat as "no password"
+				this.storedPassword = null;
+			}
+		}
 	}
 
 	async savePluginData() {
@@ -347,6 +365,7 @@ export default class SecretHiderPlugin extends Plugin {
 			settings: this.settings,
 			isLocked: this.isLocked,
 			lockedFiles: this.lockedFiles,
+			encryptedPassword: this.encryptedPassword,
 		};
 		await this.saveData(data);
 	}
