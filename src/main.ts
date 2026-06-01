@@ -65,6 +65,11 @@ export default class SecretHiderPlugin extends Plugin {
 		return this.storedPassword !== null;
 	}
 
+	/** For the settings UI "Show password" button — reveals the saved password. */
+	getStoredPasswordForDisplay(): string {
+		return this.storedPassword ?? '';
+	}
+
 	async setAndSavePassword(password: string) {
 		this.storedPassword = password;
 		this.encryptedPassword = encryptPassword(password);

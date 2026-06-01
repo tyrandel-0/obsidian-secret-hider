@@ -63,23 +63,42 @@ export class SecretHiderSettingTab extends PluginSettingTab {
 		const hasPassword = this.plugin.hasStoredPassword;
 
 		if (hasPassword) {
-			// Password is already saved — show status + Forget button
+			// Password is already saved — show status, reveal button, forget button
 			new Setting(containerEl)
 				.setName('Saved password')
 				.setDesc(
-					'A password is stored in the OS keychain (macOS Keychain / Windows DPAPI). ' +
-					'Lock and unlock will happen automatically without a prompt.',
+					'Stored in the OS keychain. Lock/unlock happens without a prompt on this device. ' +
+					'On other devices (iPhone, another Mac) you will need to type it manually — ' +
+					'use "Show" to see it and memorise it.',
 				)
+				.addButton(btn => {
+					let revealed = false;
+					btn.setButtonText('Show').onClick(() => {
+						revealed = !revealed;
+						const pw = this.plugin.getStoredPasswordForDisplay();
+						pwRevealEl.setText(revealed ? pw : '');
+						pwRevealEl.style.display = revealed ? '' : 'none';
+						btn.setButtonText(revealed ? 'Hide' : 'Show');
+					});
+				})
 				.addButton(btn =>
 					btn
-						.setButtonText('Forget password')
+						.setButtonText('Forget')
 						.setWarning()
 						.onClick(async () => {
 							await this.plugin.forgetPassword();
 							new Notice('Secret Hider: password forgotten.');
-							this.display(); // re-render
+							this.display();
 						}),
 				);
+
+			// Revealed password display (hidden by default)
+			const pwRevealEl = containerEl.createEl('p');
+			pwRevealEl.style.cssText =
+				'font-family:monospace; font-size:1.1em; letter-spacing:0.05em; ' +
+				'padding:8px 12px; background:var(--background-secondary); ' +
+				'border-radius:4px; display:none; margin:0 0 12px;';
+
 		} else {
 			// No password saved — show input + Save button
 			new Setting(containerEl)

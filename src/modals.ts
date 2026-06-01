@@ -22,6 +22,9 @@ export class PasswordModal extends BasePasswordModal {
 	onOpen() {
 		const { contentEl } = this;
 		contentEl.createEl('h2', { text: '🔒 Unlock secret files' });
+		const hint = contentEl.createEl('p');
+		hint.style.cssText = 'font-size:0.85em; color:var(--text-muted); margin:0 0 12px;';
+		hint.setText('Password is remembered until the app is closed.');
 
 		let password = '';
 
