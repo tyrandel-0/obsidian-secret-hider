@@ -1,0 +1,19 @@
+{
+	"name": "obsidian-secret-hider",
+	"version": "1.0.0",
+	"description": "Obsidian plugin that encrypts secret notes with AES-256-GCM",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"keywords": [],
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"esbuild": "0.25.5",
+		"obsidian": "latest",
+		"typescript": "^5.8.3"
+	}
+}

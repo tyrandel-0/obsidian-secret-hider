@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-secret-hider",
+	"name": "Secret Hider",
+	"version": "1.0.0",
+	"minAppVersion": "1.4.0",
+	"description": "Encrypts files marked with a YAML property using AES-256-GCM. One click to lock, one click to unlock.",
+	"author": "Secret Hider",
+	"authorUrl": "",
+	"isDesktopOnly": true
+}
