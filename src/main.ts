@@ -228,7 +228,7 @@ export default class SecretHiderPlugin extends Plugin {
 			files.map(async (file): Promise<Prepared> => {
 				const content = await this.app.vault.read(file);
 				const encrypted = await encryptWithKey(content, key, salt);
-				return { file, encPath: file.path + ENC_EXT, encData: FILE_MARKER + encrypted };
+				return { file, encPath: toEncPath(file.path), encData: FILE_MARKER + encrypted };
 			}),
 		);
 
@@ -316,7 +316,7 @@ export default class SecretHiderPlugin extends Plugin {
 			const salt = extractSalt(encData);
 			const mdPath =
 				this.lockedFiles.find(e => e.encPath === encPath)?.originalPath ??
-				encPath.slice(0, -ENC_EXT.length);
+				fromEncPath(encPath);
 
 			const group = saltGroups.find(
 				g => g.salt.length === salt.length && g.salt.every((b, i) => b === salt[i]),
@@ -366,11 +366,13 @@ export default class SecretHiderPlugin extends Plugin {
 	private async walkForEncFiles(dir: string, out: string[]) {
 		const { files, folders } = await this.app.vault.adapter.list(dir);
 		for (const f of files) {
-			if (f.endsWith(ENC_EXT)) out.push(f);
+			const name = f.split('/').pop() ?? f;
+			// Our encrypted files are hidden dotfiles: .filename.md.enc
+			if (name.startsWith('.') && name.endsWith(ENC_EXT)) out.push(f);
 		}
 		for (const sub of folders) {
 			const name = sub.split('/').pop() ?? sub;
-			if (name.startsWith('.')) continue;
+			if (name.startsWith('.')) continue; // skip .obsidian, .trash, etc.
 			await this.walkForEncFiles(sub, out);
 		}
 	}
@@ -411,6 +413,34 @@ export default class SecretHiderPlugin extends Plugin {
 }
 
 // ── Module-level helpers ──────────────────────────────────────────────────────
+
+/**
+ * Build the encrypted file path: insert a leading dot before the filename.
+ *   'Notes/diary.md'  →  'Notes/.diary.md.enc'
+ *   'diary.md'        →  '.diary.md.enc'
+ *
+ * Dotfiles are not indexed by Obsidian — they disappear from the file
+ * explorer, search, Bases, and graph without any extra configuration.
+ */
+function toEncPath(filePath: string): string {
+	const slash = filePath.lastIndexOf('/');
+	return slash === -1
+		? '.' + filePath + ENC_EXT
+		: filePath.slice(0, slash + 1) + '.' + filePath.slice(slash + 1) + ENC_EXT;
+}
+
+/**
+ * Reverse of toEncPath — used only in the fallback vault walk (no manifest).
+ *   'Notes/.diary.md.enc'  →  'Notes/diary.md'
+ *   '.diary.md.enc'        →  'diary.md'
+ */
+function fromEncPath(encPath: string): string {
+	const withoutExt = encPath.slice(0, -ENC_EXT.length); // 'Notes/.diary.md'
+	const slash = withoutExt.lastIndexOf('/');
+	return slash === -1
+		? withoutExt.slice(1)                                          // remove leading dot
+		: withoutExt.slice(0, slash + 1) + withoutExt.slice(slash + 2); // remove dot after /
+}
 
 /**
  * Returns true when a frontmatter value should be treated as "secret = on".
