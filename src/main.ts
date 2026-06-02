@@ -127,22 +127,31 @@ export default class SecretHiderPlugin extends Plugin {
 	/**
 	 * Returns the password to use for the current operation.
 	 *   - If a password is saved in the OS keychain → return it immediately (no UI).
-	 *   - Otherwise → open the appropriate modal and wait for user input.
-	 *     mode='lock'   → PasswordConfirmModal (requires confirmation, sets password for this op)
-	 *     mode='unlock' → PasswordModal (single field)
+	 *   - Otherwise → open a modal. If the user ticks "Remember password" (desktop
+	 *     only), the password is saved to the OS keychain so future operations on
+	 *     this device skip the prompt entirely.
 	 */
 	private async getPassword(mode: 'lock' | 'unlock'): Promise<string | null> {
 		if (this.storedPassword) return this.storedPassword;
 
-		if (mode === 'lock') {
-			const modal = new PasswordConfirmModal(this.app);
-			modal.open();
-			return modal.result;
-		} else {
-			const modal = new PasswordModal(this.app);
-			modal.open();
-			return modal.result;
+		const canRemember = isSecureStorageAvailable();
+		const modal =
+			mode === 'lock'
+				? new PasswordConfirmModal(this.app, canRemember)
+				: new PasswordModal(this.app, canRemember);
+		modal.open();
+
+		const res = await modal.result;
+		if (!res) return null;
+
+		if (res.remember && canRemember) {
+			try {
+				await this.setAndSavePassword(res.password);
+			} catch (e) {
+				new Notice(`Secret Hider: could not save password — ${(e as Error).message}`);
+			}
 		}
+		return res.password;
 	}
 
 	// ── Lock ──────────────────────────────────────────────────────────────────
