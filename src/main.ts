@@ -69,6 +69,15 @@ export default class SecretHiderPlugin extends Plugin {
 				new Notice(report, 15000);
 			},
 		});
+
+		// Keep the button in sync when another device locks/unlocks via sync.
+		// data.json is synced (iCloud / Obsidian Sync), but we only read it on
+		// load — so we re-read it periodically and whenever the app regains focus.
+		this.registerInterval(window.setInterval(() => this.refreshLockState(), 5000));
+		this.registerDomEvent(window, 'focus', () => this.refreshLockState());
+		this.registerEvent(
+			this.app.workspace.on('active-leaf-change', () => this.refreshLockState()),
+		);
 	}
 
 	onunload() {
@@ -119,6 +128,32 @@ export default class SecretHiderPlugin extends Plugin {
 		);
 		this.floatingBtn.toggleClass('secret-hider-btn--locked', locked);
 		this.floatingBtn.toggleClass('secret-hider-btn--unlocked', !locked);
+	}
+
+	// ── Sync state refresh ──────────────────────────────────────────────────────
+
+	/**
+	 * Re-read the lock state from data.json (which syncs across devices) and
+	 * update the button if it changed elsewhere. Skipped while an operation is
+	 * in progress to avoid clobbering an in-flight lock/unlock.
+	 */
+	private async refreshLockState() {
+		if (this.busy) return;
+		try {
+			const raw = (await this.loadData()) as PluginData | null;
+			if (!raw) return;
+
+			const remoteLocked = raw.isLocked ?? false;
+			// Keep the manifest fresh so unlock knows the original paths
+			if (raw.lockedFiles) this.lockedFiles = raw.lockedFiles;
+
+			if (remoteLocked !== this.isLocked) {
+				this.isLocked = remoteLocked;
+				this.updateButtonUI();
+			}
+		} catch {
+			// Transient read error (e.g. mid-sync) — ignore, next tick will retry
+		}
 	}
 
 	// ── Toggle ────────────────────────────────────────────────────────────────
