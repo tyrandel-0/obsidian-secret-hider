@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type SecretHiderPlugin from './main';
-import { isSecureStorageAvailable } from './password-storage';
+import { canPersistPassword, isNativeKeychainAvailable } from './password-storage';
 
 export interface SecretHiderSettings {
 	secretProperty: string;
@@ -47,14 +47,30 @@ export class SecretHiderSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h2', { text: 'Password' });
 
-		const available = isSecureStorageAvailable();
+		const available = canPersistPassword(this.app);
+
+		// Note which backend is in use so the user understands cross-device behaviour
+		const backendNote = containerEl.createEl('p');
+		backendNote.style.cssText = 'font-size:0.85em; color:var(--text-muted); margin:0 0 12px;';
+		if (isNativeKeychainAvailable(this.app)) {
+			backendNote.setText(
+				'Using Obsidian\'s built-in keychain (Settings → Keychain). ' +
+				'Works on desktop and mobile; the password is stored by your OS, not in the vault.',
+			);
+		} else if (available) {
+			backendNote.setText(
+				'Using the OS keychain via Electron (desktop). ' +
+				'Update Obsidian to 1.11.4+ to enable cross-platform keychain on mobile too.',
+			);
+		}
 
 		if (!available) {
-			// Show a warning if the OS cannot provide secure storage (some Linux configs)
+			// No secure storage backend on this device
 			const warn = containerEl.createEl('p', {
 				cls: 'secret-hider-error',
-				text: '⚠ Secure OS storage is not available on this device (no GNOME Keyring / KWallet detected). '
-					+ 'Password cannot be saved — you will need to enter it manually each time.',
+				text: '⚠ Secure storage is not available on this device. '
+					+ 'Password cannot be saved — you will need to enter it manually each time. '
+					+ '(On mobile, Obsidian 1.11.4+ is required for keychain support.)',
 			});
 			warn.style.marginBottom = '12px';
 			return;

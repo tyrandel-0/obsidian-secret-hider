@@ -57,10 +57,17 @@ The property name is **case-insensitive** — `Secret`, `SECRET`, and `secret` a
 **Secret property** (default: `secret`)
 The frontmatter key used to identify secret notes. Change this if you want to use a different property name. Case-insensitive.
 
-**Save password** (desktop only)
-Enter your password once and save it to the OS keychain. After that, locking and unlocking happens with a single tap — no password prompt. On mobile this option is not available; the password is kept in memory until the app is closed.
+**Remember password**
+Tick the "Remember password" toggle in the lock/unlock dialog (or use the Save password field in settings). The password is then stored in the keychain, and locking/unlocking happens with a single tap — no prompt.
 
-> **Important for multi-device setups:** If you use the saved password on your Mac, go to Settings → Secret Hider → **Show** to see the actual password. You'll need to type it manually on iPhone.
+Storage backend, in order of preference:
+- **Obsidian's built-in keychain** (`app.secretStorage`, Obsidian 1.11.4+) — works on **both desktop and mobile**. The password lives in your OS credential store (macOS Keychain, Windows Credential Manager, Linux libsecret, iOS Keychain, Android Keystore) and appears under **Settings → Keychain**. Nothing sensitive is written to the vault.
+- **Electron safeStorage** (older desktop builds) — OS-encrypted blob stored in the plugin's `data.json`.
+- **Session-only** (older mobile) — password kept in memory until the app closes.
+
+If you previously saved a password via the old Electron path, it is automatically migrated to the built-in keychain on first load.
+
+> **Note:** Obsidian's keychain is per-vault and per-device. On iCloud/Sync setups the password is **not** synced — you enter it once per device, then it's remembered there.
 
 ## Security model
 

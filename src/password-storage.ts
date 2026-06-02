@@ -1,22 +1,43 @@
-import { Platform } from 'obsidian';
+import { App, Platform } from 'obsidian';
 
 /**
- * Wrapper around Electron's safeStorage.
+ * Password storage with a layered strategy:
  *
- * IMPORTANT: safeStorage lives in the Electron MAIN process. Obsidian plugins
- * run in the RENDERER process, where `require('electron').safeStorage` is
- * undefined. We reach the main-process module through @electron/remote
- * (Obsidian bundles it and uses it for menus, dialogs, etc.).
+ *   1. Obsidian SecretStorage (app.secretStorage, since v1.11.4) — PREFERRED.
+ *      Cross-platform: the value lives in the OS keychain (macOS Keychain,
+ *      Windows Credential Manager, Linux libsecret, iOS Keychain, Android
+ *      Keystore). Works identically on desktop and mobile. Shown to the user
+ *      under Settings → Keychain. data.json stores nothing sensitive.
  *
- * safeStorage encrypts/decrypts via the OS credential subsystem:
- *   macOS  → Keychain (tied to the user's login keychain)
- *   Windows → DPAPI   (tied to the Windows user account)
- *   Linux  → GNOME Keyring / KWallet (falls back to a static key if no daemon)
+ *   2. electron.safeStorage via @electron/remote (desktop, older Obsidian) —
+ *      FALLBACK when SecretStorage is unavailable. Encrypted blob is kept in
+ *      data.json by the caller.
  *
- * Encrypted bytes are stored as base64 in data.json. They are MACHINE-SPECIFIC:
- * copying data.json to another device won't expose the password because the
- * decryption key lives in the OS, not in the file.
+ *   3. Neither available (old mobile) — caller keeps the password in memory
+ *      for the session only.
  */
+
+const SECRET_ID = 'secret-hider-password';
+
+// ── Obsidian SecretStorage (preferred, cross-platform) ───────────────────────
+
+interface SecretStorageLike {
+	setSecret(id: string, secret: string): void;
+	getSecret(id: string): string | null;
+	listSecrets(): string[];
+}
+
+function getSecretStorage(app: App): SecretStorageLike | null {
+	const ss = (app as App & { secretStorage?: SecretStorageLike }).secretStorage;
+	return ss && typeof ss.getSecret === 'function' ? ss : null;
+}
+
+/** True when the cross-platform Obsidian keychain is available (Obsidian 1.11.4+). */
+export function isNativeKeychainAvailable(app: App): boolean {
+	return getSecretStorage(app) !== null;
+}
+
+// ── electron.safeStorage (desktop fallback) ──────────────────────────────────
 
 interface SafeStorage {
 	isEncryptionAvailable(): boolean;
@@ -24,44 +45,35 @@ interface SafeStorage {
 	decryptString(encrypted: Buffer): string;
 }
 
-let cached: SafeStorage | null | undefined;
+let cachedSafe: SafeStorage | null | undefined;
 
 function getSafeStorage(): SafeStorage | null {
-	if (cached !== undefined) return cached;
-
-	// Only desktop has Electron / Node at all.
+	if (cachedSafe !== undefined) return cachedSafe;
 	if (!Platform.isDesktopApp) {
-		cached = null;
-		return cached;
+		cachedSafe = null;
+		return cachedSafe;
 	}
-
 	const candidates: Array<() => SafeStorage | undefined> = [
-		// Preferred: main-process module bridged into the renderer
 		() => (require('@electron/remote') as { safeStorage?: SafeStorage }).safeStorage,
-		// Legacy Electron (<14): electron.remote
 		() => (require('electron') as { remote?: { safeStorage?: SafeStorage } }).remote?.safeStorage,
-		// Fallback: in case this ever runs in the main process directly
 		() => (require('electron') as { safeStorage?: SafeStorage }).safeStorage,
 	];
-
 	for (const get of candidates) {
 		try {
 			const ss = get();
 			if (ss && typeof ss.isEncryptionAvailable === 'function') {
-				cached = ss;
-				return cached;
+				cachedSafe = ss;
+				return cachedSafe;
 			}
 		} catch {
-			// module not resolvable via this path — try the next
+			// try next
 		}
 	}
-
-	cached = null;
-	return cached;
+	cachedSafe = null;
+	return cachedSafe;
 }
 
-/** True when the OS can protect the key (always true on macOS/Windows desktop). */
-export function isSecureStorageAvailable(): boolean {
+function isSafeStorageAvailable(): boolean {
 	try {
 		return getSafeStorage()?.isEncryptionAvailable() ?? false;
 	} catch {
@@ -69,52 +81,74 @@ export function isSecureStorageAvailable(): boolean {
 	}
 }
 
-/** Human-readable diagnostic for the debug command. */
-export function secureStorageDiagnostic(): string {
-	const lines: string[] = [];
-	lines.push(`Platform.isDesktopApp: ${Platform.isDesktopApp}`);
+// ── Public API ───────────────────────────────────────────────────────────────
 
-	const probe = (label: string, get: () => unknown) => {
-		try {
-			const v = get();
-			lines.push(`${label}: ${v ? 'found' : 'undefined'}`);
-		} catch (e) {
-			lines.push(`${label}: error (${(e as Error).message})`);
-		}
-	};
-
-	probe('@electron/remote .safeStorage', () =>
-		(require('@electron/remote') as { safeStorage?: unknown }).safeStorage);
-	probe('electron.remote .safeStorage', () =>
-		(require('electron') as { remote?: { safeStorage?: unknown } }).remote?.safeStorage);
-	probe('electron .safeStorage', () =>
-		(require('electron') as { safeStorage?: unknown }).safeStorage);
-
-	const ss = getSafeStorage();
-	lines.push(`resolved safeStorage: ${ss ? 'yes' : 'no'}`);
-	if (ss) {
-		try {
-			lines.push(`isEncryptionAvailable(): ${ss.isEncryptionAvailable()}`);
-		} catch (e) {
-			lines.push(`isEncryptionAvailable() threw: ${(e as Error).message}`);
-		}
-	}
-	return lines.join('\n');
-}
-
-/** Encrypt a plaintext password → base64 string safe to store in data.json. */
-export function encryptPassword(password: string): string {
-	const ss = getSafeStorage();
-	if (!ss) throw new Error('OS secure storage is not available');
-	return ss.encryptString(password).toString('base64');
+/** True when the password can be persisted on this device (any backend). */
+export function canPersistPassword(app: App): boolean {
+	return isNativeKeychainAvailable(app) || isSafeStorageAvailable();
 }
 
 /**
- * Decrypt a base64-encoded password previously encrypted by encryptPassword.
- * Throws if the encryption key has changed (different machine / OS reinstall).
+ * Persist the password. Prefers the native cross-platform keychain.
+ * Returns a legacy encrypted blob ONLY when falling back to safeStorage
+ * (the caller must store it in data.json); returns null when the native
+ * keychain handled it (nothing to store in data.json).
  */
-export function decryptPassword(encryptedBase64: string): string {
-	const ss = getSafeStorage();
-	if (!ss) throw new Error('OS secure storage is not available');
-	return ss.decryptString(Buffer.from(encryptedBase64, 'base64'));
+export function savePassword(app: App, password: string): { legacyBlob: string | null } {
+	const native = getSecretStorage(app);
+	if (native) {
+		native.setSecret(SECRET_ID, password);
+		return { legacyBlob: null };
+	}
+	const safe = getSafeStorage();
+	if (safe) {
+		return { legacyBlob: safe.encryptString(password).toString('base64') };
+	}
+	throw new Error('no secure storage available on this device');
+}
+
+/**
+ * Load the saved password.
+ * @param legacyBlob optional safeStorage blob from data.json (older versions)
+ * @returns the password, or null if none / undecryptable on this machine
+ */
+export function loadPassword(app: App, legacyBlob?: string): string | null {
+	const native = getSecretStorage(app);
+	if (native) {
+		const v = native.getSecret(SECRET_ID);
+		if (v) return v;
+	}
+	if (legacyBlob) {
+		const safe = getSafeStorage();
+		if (safe) {
+			try {
+				return safe.decryptString(Buffer.from(legacyBlob, 'base64'));
+			} catch {
+				return null; // different machine / key changed
+			}
+		}
+	}
+	return null;
+}
+
+/** Remove the saved password. SecretStorage has no delete, so we blank it. */
+export function clearPassword(app: App): void {
+	const native = getSecretStorage(app);
+	if (native) {
+		try {
+			native.setSecret(SECRET_ID, '');
+		} catch {
+			// ignore
+		}
+	}
+}
+
+/** Diagnostic report for the debug command. */
+export function secureStorageDiagnostic(app: App): string {
+	const lines: string[] = [];
+	lines.push(`Platform.isDesktopApp: ${Platform.isDesktopApp}`);
+	lines.push(`Obsidian SecretStorage (app.secretStorage): ${isNativeKeychainAvailable(app) ? 'available ✓' : 'not available'}`);
+	lines.push(`electron safeStorage fallback: ${isSafeStorageAvailable() ? 'available' : 'not available'}`);
+	lines.push(`Can persist password: ${canPersistPassword(app) ? 'YES' : 'no (session-only)'}`);
+	return lines.join('\n');
 }

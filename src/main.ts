@@ -9,9 +9,10 @@ import {
 import { PasswordModal, PasswordConfirmModal } from './modals';
 import { SecretHiderSettings, DEFAULT_SETTINGS, SecretHiderSettingTab } from './settings';
 import {
-	isSecureStorageAvailable,
-	encryptPassword,
-	decryptPassword,
+	canPersistPassword,
+	savePassword,
+	loadPassword,
+	clearPassword,
 	secureStorageDiagnostic,
 } from './password-storage';
 
@@ -31,7 +32,9 @@ interface PluginData {
 	settings: SecretHiderSettings;
 	isLocked: boolean;
 	lockedFiles: LockedFileEntry[];
-	encryptedPassword?: string; // safeStorage-encrypted base64; never the plaintext
+	// Legacy: safeStorage-encrypted base64 from older versions. Migrated to the
+	// native Obsidian keychain on load, then cleared. Never the plaintext.
+	encryptedPassword?: string;
 }
 
 export default class SecretHiderPlugin extends Plugin {
@@ -41,9 +44,9 @@ export default class SecretHiderPlugin extends Plugin {
 	private busy = false;
 	private floatingBtn!: HTMLElement;
 
-	// Password in memory (decrypted). Never written to disk in plain form.
+	// Password in memory. Never written to disk in plain form.
 	private storedPassword: string | null = null;
-	// Encrypted password blob stored in data.json.
+	// Legacy safeStorage blob, kept only until migrated to the native keychain.
 	private encryptedPassword: string | undefined;
 
 	// ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -61,7 +64,7 @@ export default class SecretHiderPlugin extends Plugin {
 			id: 'debug-secure-storage',
 			name: 'Debug: secure storage availability',
 			callback: () => {
-				const report = secureStorageDiagnostic();
+				const report = secureStorageDiagnostic(this.app);
 				console.log('[Secret Hider] secure storage diagnostic:\n' + report);
 				new Notice(report, 15000);
 			},
@@ -86,13 +89,16 @@ export default class SecretHiderPlugin extends Plugin {
 
 	async setAndSavePassword(password: string) {
 		this.storedPassword = password;
-		this.encryptedPassword = encryptPassword(password);
+		// Prefer the native keychain; safeStorage fallback returns a blob for data.json
+		const { legacyBlob } = savePassword(this.app, password);
+		this.encryptedPassword = legacyBlob ?? undefined;
 		await this.savePluginData();
 	}
 
 	async forgetPassword() {
 		this.storedPassword = null;
 		this.encryptedPassword = undefined;
+		clearPassword(this.app);
 		await this.savePluginData();
 	}
 
@@ -140,15 +146,15 @@ export default class SecretHiderPlugin extends Plugin {
 
 	/**
 	 * Returns the password to use for the current operation.
-	 *   - If a password is saved in the OS keychain → return it immediately (no UI).
-	 *   - Otherwise → open a modal. If the user ticks "Remember password" (desktop
-	 *     only), the password is saved to the OS keychain so future operations on
-	 *     this device skip the prompt entirely.
+	 *   - If a password is saved in the keychain → return it immediately (no UI).
+	 *   - Otherwise → open a modal. If the user ticks "Remember password" (when a
+	 *     keychain is available — desktop, or mobile on Obsidian 1.11.4+), the
+	 *     password is saved so future operations on this device skip the prompt.
 	 */
 	private async getPassword(mode: 'lock' | 'unlock'): Promise<string | null> {
 		if (this.storedPassword) return this.storedPassword;
 
-		const canRemember = isSecureStorageAvailable();
+		const canRemember = canPersistPassword(this.app);
 		const modal =
 			mode === 'lock'
 				? new PasswordConfirmModal(this.app, canRemember)
@@ -409,13 +415,22 @@ export default class SecretHiderPlugin extends Plugin {
 		this.lockedFiles = raw?.lockedFiles ?? [];
 		this.encryptedPassword = raw?.encryptedPassword;
 
-		// Decrypt stored password if safeStorage is available on this machine
-		if (this.encryptedPassword && isSecureStorageAvailable()) {
+		// Load the saved password from the native keychain, falling back to a
+		// legacy safeStorage blob in data.json (returns null if undecryptable here).
+		this.storedPassword = loadPassword(this.app, this.encryptedPassword);
+
+		// One-time migration: if the password came from the legacy safeStorage blob
+		// and the native keychain is now available, move it over and drop the blob.
+		if (this.storedPassword && this.encryptedPassword && canPersistPassword(this.app)) {
 			try {
-				this.storedPassword = decryptPassword(this.encryptedPassword);
+				const { legacyBlob } = savePassword(this.app, this.storedPassword);
+				if (legacyBlob === null) {
+					// Successfully stored in the native keychain — remove the legacy blob
+					this.encryptedPassword = undefined;
+					await this.savePluginData();
+				}
 			} catch {
-				// Different machine / OS reinstall — key changed, treat as "no password"
-				this.storedPassword = null;
+				// Migration is best-effort; keep using the legacy blob if it fails
 			}
 		}
 	}
