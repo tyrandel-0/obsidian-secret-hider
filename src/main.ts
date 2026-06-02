@@ -8,7 +8,12 @@ import {
 } from './crypto';
 import { PasswordModal, PasswordConfirmModal } from './modals';
 import { SecretHiderSettings, DEFAULT_SETTINGS, SecretHiderSettingTab } from './settings';
-import { isSecureStorageAvailable, encryptPassword, decryptPassword } from './password-storage';
+import {
+	isSecureStorageAvailable,
+	encryptPassword,
+	decryptPassword,
+	secureStorageDiagnostic,
+} from './password-storage';
 
 const ENC_EXT = '.enc';
 const FILE_MARKER = 'OBSIDIAN-SECRET-HIDER-V1\n';
@@ -51,6 +56,15 @@ export default class SecretHiderPlugin extends Plugin {
 			id: 'toggle-secret-files',
 			name: 'Toggle lock/unlock secret files',
 			callback: () => this.handleToggle(),
+		});
+		this.addCommand({
+			id: 'debug-secure-storage',
+			name: 'Debug: secure storage availability',
+			callback: () => {
+				const report = secureStorageDiagnostic();
+				console.log('[Secret Hider] secure storage diagnostic:\n' + report);
+				new Notice(report, 15000);
+			},
 		});
 	}
 
